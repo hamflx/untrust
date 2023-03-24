@@ -66,17 +66,23 @@ fn main() {
     }
 
     let stores = [
-        (CertStore::from_user_root(), "backup-user"),
-        (CertStore::from_local_machine_root(), "backup-local_machine"),
+        (CertStore::from_user_root().unwrap(), "backup-user"),
+        (
+            CertStore::from_local_machine_root().unwrap(),
+            "backup-local_machine",
+        ),
     ];
     for (store, path) in stores.iter() {
         println!("{}:", store.name());
         let mut has_changes = false;
-        let backup_store = CertStore::from_memory();
+        let backup_store = CertStore::from_memory().unwrap();
 
         for cert in store.list_certs() {
             let encoded_cert = cert.encoded_cert();
-            let hash = cert.hash().unwrap();
+            let Ok(hash) = cert.hash() else {
+                eprintln!("Failed to get cert hash");
+                continue;
+            };
             if !trusted_certs_hash.contains(&hash) {
                 let cert_name = cert.name().unwrap_or_else(|err| format!("Err({})", err));
                 let cert_issuer = cert.issuer().unwrap_or_else(|err| format!("Err({})", err));
@@ -121,8 +127,8 @@ impl CertStore {
         self.1.as_str()
     }
 
-    fn from_memory() -> Self {
-        Self(
+    fn from_memory() -> Result<Self, std::io::Error> {
+        Ok(Self(
             unsafe {
                 CertOpenStore(
                     CERT_STORE_PROV_MEMORY,
@@ -130,15 +136,18 @@ impl CertStore {
                     HCRYPTPROV_LEGACY::default(),
                     CERT_OPEN_STORE_FLAGS::default(),
                     None,
-                )
-                .unwrap()
+                )?
             },
             "MEM".into(),
-        )
+        ))
     }
 
-    fn from_system(flags: CERT_OPEN_STORE_FLAGS, store: &[u8], name: String) -> Self {
-        Self(
+    fn from_system(
+        flags: CERT_OPEN_STORE_FLAGS,
+        store: &[u8],
+        name: String,
+    ) -> Result<Self, std::io::Error> {
+        Ok(Self(
             unsafe {
                 CertOpenStore(
                     CERT_STORE_PROV_SYSTEM_A,
@@ -146,14 +155,13 @@ impl CertStore {
                     HCRYPTPROV_LEGACY::default(),
                     flags,
                     Some(store.as_ptr() as *const c_void),
-                )
-                .unwrap()
+                )?
             },
             name,
-        )
+        ))
     }
 
-    fn from_local_machine_root() -> Self {
+    fn from_local_machine_root() -> Result<Self, std::io::Error> {
         Self::from_system(
             CERT_OPEN_STORE_FLAGS(
                 CERT_SYSTEM_STORE_LOCAL_MACHINE.0 | CERT_STORE_OPEN_EXISTING_FLAG.0,
@@ -163,7 +171,7 @@ impl CertStore {
         )
     }
 
-    fn from_user_root() -> Self {
+    fn from_user_root() -> Result<Self, std::io::Error> {
         Self::from_system(
             CERT_OPEN_STORE_FLAGS(
                 CERT_SYSTEM_STORE_CURRENT_USER.0 | CERT_STORE_OPEN_EXISTING_FLAG.0,
