@@ -1,9 +1,12 @@
 [package]
-name = "clean-certs"
+name = "untrust"
 version = "0.1.0"
 edition = "2021"
 authors = ["hamflx <a@hamflx.cn>"]
 
 [dependencies]
+chrono = "0.4.24"
+clap = { version = "4.1.13", features = ["derive"] }
 picky = { version = "7.0.0-rc.4", features = ["pkcs7", "ctl_http_fetch"] }
+vc-ltl = "5.0.5"
 windows = { version = "0.46.0", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

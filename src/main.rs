@@ -3,29 +3,60 @@ use std::{
     slice::from_raw_parts,
 };
 
+use chrono::Local;
+use clap::{Parser, Subcommand};
 use picky::x509::pkcs7::ctl::{http_fetch::CtlHttpFetch, CertificateTrustList};
 use windows::Win32::Security::Cryptography::{
-    CertAddEncodedCertificateToStore, CertDeleteCertificateFromStore,
-    CertDuplicateCertificateContext, CertEnumCertificatesInStore, CertGetNameStringA,
-    CertOpenStore, CertSaveStore, CryptHashCertificate, ALG_CLASS_HASH, ALG_SID_SHA1, CERT_CONTEXT,
+    CertAddEncodedCertificateToStore, CertCloseStore, CertDeleteCertificateFromStore,
+    CertDuplicateCertificateContext, CertEnumCertificatesInStore,
+    CertGetCertificateContextProperty, CertGetNameStringA, CertOpenStore, CertSaveStore,
+    CryptHashCertificate, ALG_CLASS_HASH, ALG_SID_SHA1, CERT_CONTEXT, CERT_NAME_ISSUER_FLAG,
     CERT_NAME_SIMPLE_DISPLAY_TYPE, CERT_OPEN_STORE_FLAGS, CERT_QUERY_ENCODING_TYPE,
-    CERT_STORE_ADD_REPLACE_EXISTING, CERT_STORE_OPEN_EXISTING_FLAG, CERT_STORE_PROV_MEMORY,
-    CERT_STORE_PROV_SYSTEM_A, CERT_STORE_SAVE_AS_PKCS7, CERT_STORE_SAVE_TO_FILENAME_A, HCERTSTORE,
-    HCRYPTPROV_LEGACY, PKCS_7_ASN_ENCODING, X509_ASN_ENCODING,
+    CERT_SIGN_HASH_CNG_ALG_PROP_ID, CERT_STORE_ADD_REPLACE_EXISTING, CERT_STORE_OPEN_EXISTING_FLAG,
+    CERT_STORE_PROV_MEMORY, CERT_STORE_PROV_SYSTEM_A, CERT_STORE_SAVE_AS_PKCS7,
+    CERT_STORE_SAVE_TO_FILENAME_A, HCERTSTORE, HCRYPTPROV_LEGACY, PKCS_7_ASN_ENCODING,
+    X509_ASN_ENCODING,
 };
 
 const CERT_SYSTEM_STORE_CURRENT_USER: CERT_OPEN_STORE_FLAGS = CERT_OPEN_STORE_FLAGS(0x00010000);
 const CERT_SYSTEM_STORE_LOCAL_MACHINE: CERT_OPEN_STORE_FLAGS = CERT_OPEN_STORE_FLAGS(0x00020000);
 
-fn to_hex_string(bytes: &[u8]) -> String {
+fn to_hex_string(bytes: &[u8], join_space: bool) -> String {
     let mut hex = String::with_capacity(bytes.len() * 2);
-    for ch in bytes {
-        hex.push_str(&format!("{:02X}", *ch));
+    match (join_space, bytes) {
+        (true, [rest @ .., last]) => {
+            for ch in rest {
+                hex.push_str(&format!("{:02X} ", *ch));
+            }
+            hex.push_str(&format!("{:02X}", *last));
+        }
+        _ => {
+            for ch in &bytes[..bytes.len() - 1] {
+                hex.push_str(&format!("{:02X}", *ch));
+            }
+        }
     }
     hex
 }
 
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[command(subcommand)]
+    command: UntrustCommand,
+}
+
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+enum UntrustCommand {
+    Clean,
+    Check,
+    Dump,
+}
+
 fn main() {
+    let delete = Args::parse().command == UntrustCommand::Clean;
+    let dump = Args::parse().command == UntrustCommand::Dump;
+
     let mut trusted_certs_hash = Vec::new();
     let ctl = CertificateTrustList::fetch().unwrap();
     let ctl_cert_list = ctl.ctl_entries().unwrap();
@@ -35,51 +66,52 @@ fn main() {
     }
 
     let stores = [
-        (
-            CertStore::from_user_root(),
-            CertStore::from_memory(),
-            "user",
-        ),
-        (
-            CertStore::from_local_machine_root(),
-            CertStore::from_memory(),
-            "local_machine",
-        ),
+        (CertStore::from_user_root(), "backup-user"),
+        (CertStore::from_local_machine_root(), "backup-local_machine"),
     ];
-    for (store, backup_store, _) in stores.iter() {
-        println!("==> enumerating: {}", store.name());
+    for (store, path) in stores.iter() {
+        println!("{}:", store.name());
+        let mut has_changes = false;
+        let backup_store = CertStore::from_memory();
 
         for cert in store.list_certs() {
             let encoded_cert = cert.encoded_cert();
             let hash = cert.hash().unwrap();
             if !trusted_certs_hash.contains(&hash) {
-                let cert_name = cert.name().unwrap();
+                let cert_name = cert.name().unwrap_or_else(|err| format!("Err({})", err));
+                let cert_issuer = cert.issuer().unwrap_or_else(|err| format!("Err({})", err));
+                let serial_number = cert.serial_number().unwrap_or_default();
+                let algorithm = cert.algorithm().unwrap_or_default();
 
+                println!("    {}", cert_name);
+                println!("        Cert Issuer:   {}", cert_issuer);
                 println!(
-                    "    cert: {}, fingerprint: {}",
-                    cert_name,
-                    to_hex_string(&hash)
+                    "        Serial Number: {}",
+                    to_hex_string(serial_number, true)
                 );
+                println!("        Thumbprint:    {}", to_hex_string(&hash, false));
+                println!("        Algorithm:     {}", algorithm);
 
-                if !backup_store.add_cert(encoded_cert) {
-                    panic!(
-                        "Failed to add cert to store: {:?}",
-                        std::io::Error::last_os_error()
-                    );
+                if delete || dump {
+                    if let Err(err) = backup_store.add_cert(encoded_cert) {
+                        eprintln!("Failed to add cert to backup store: {}", err);
+                        continue;
+                    }
+                    has_changes = true;
                 }
-
-                if cert.duplicate().delete() {
-                    eprintln!(
-                        "        Failed to delete cert from store: {:?}",
-                        std::io::Error::last_os_error()
-                    );
+                if delete {
+                    if let Err(err) = cert.duplicate().delete() {
+                        eprintln!("Failed to delete cert from store: {}", err);
+                    }
                 }
             }
         }
-    }
 
-    stores[0].1.save(stores[0].2);
-    stores[1].1.save(stores[1].2);
+        if has_changes {
+            let full_path = format!("{}-{}", path, Local::now().format("%Y%m%d%H%M%S"));
+            backup_store.save(&full_path);
+        }
+    }
 }
 
 struct CertStore(HCERTSTORE, String);
@@ -105,7 +137,7 @@ impl CertStore {
         )
     }
 
-    fn from_system(flags: CERT_OPEN_STORE_FLAGS, name: String) -> Self {
+    fn from_system(flags: CERT_OPEN_STORE_FLAGS, store: &[u8], name: String) -> Self {
         Self(
             unsafe {
                 CertOpenStore(
@@ -113,7 +145,7 @@ impl CertStore {
                     CERT_QUERY_ENCODING_TYPE::default(),
                     HCRYPTPROV_LEGACY::default(),
                     flags,
-                    Some(b"Root\0".as_ptr() as *const c_void),
+                    Some(store.as_ptr() as *const c_void),
                 )
                 .unwrap()
             },
@@ -126,6 +158,7 @@ impl CertStore {
             CERT_OPEN_STORE_FLAGS(
                 CERT_SYSTEM_STORE_LOCAL_MACHINE.0 | CERT_STORE_OPEN_EXISTING_FLAG.0,
             ),
+            b"Root\0",
             "LocalMachine/Root".into(),
         )
     }
@@ -135,6 +168,7 @@ impl CertStore {
             CERT_OPEN_STORE_FLAGS(
                 CERT_SYSTEM_STORE_CURRENT_USER.0 | CERT_STORE_OPEN_EXISTING_FLAG.0,
             ),
+            b"Root\0",
             "User/Root".into(),
         )
     }
@@ -143,8 +177,8 @@ impl CertStore {
         CertsIter(self, None)
     }
 
-    fn add_cert(&self, encoded_cert: &[u8]) -> bool {
-        unsafe {
+    fn add_cert(&self, encoded_cert: &[u8]) -> Result<(), std::io::Error> {
+        match unsafe {
             CertAddEncodedCertificateToStore(
                 self.0,
                 PKCS_7_ASN_ENCODING | X509_ASN_ENCODING,
@@ -154,6 +188,10 @@ impl CertStore {
             )
         }
         .as_bool()
+        {
+            true => Ok(()),
+            false => Err(std::io::Error::last_os_error()),
+        }
     }
 
     fn save(&self, path: &str) {
@@ -173,6 +211,12 @@ impl CertStore {
                 0,
             );
         }
+    }
+}
+
+impl Drop for CertStore {
+    fn drop(&mut self) {
+        debug_assert!(unsafe { CertCloseStore(self.0, 0) }.as_bool());
     }
 }
 
@@ -196,12 +240,50 @@ struct Certificate(*const CERT_CONTEXT);
 
 impl Certificate {
     fn name(&self) -> Result<String, &'static str> {
+        self.get_name_string(0)
+    }
+
+    fn issuer(&self) -> Result<String, &'static str> {
+        self.get_name_string(CERT_NAME_ISSUER_FLAG)
+    }
+
+    fn algorithm(&self) -> Result<String, String> {
+        let mut buffer_size = 0;
+        if !unsafe {
+            CertGetCertificateContextProperty(
+                self.0,
+                CERT_SIGN_HASH_CNG_ALG_PROP_ID,
+                None,
+                &mut buffer_size,
+            )
+        }
+        .as_bool()
+        {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        let mut buffer = vec![0u16; (buffer_size / 2) as usize];
+        if !unsafe {
+            CertGetCertificateContextProperty(
+                self.0,
+                CERT_SIGN_HASH_CNG_ALG_PROP_ID,
+                Some(buffer.as_mut_ptr() as *mut c_void),
+                &mut buffer_size,
+            )
+        }
+        .as_bool()
+        {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        String::from_utf16(&buffer).map_err(|err| format!("String::from_utf8 error: {}", err))
+    }
+
+    fn get_name_string(&self, flags: u32) -> Result<String, &'static str> {
         let mut cert_name = [0; 4096];
         let bytes = unsafe {
             CertGetNameStringA(
                 self.0,
                 CERT_NAME_SIMPLE_DISPLAY_TYPE,
-                0,
+                flags,
                 None,
                 Some(&mut cert_name),
             )
@@ -212,9 +294,9 @@ impl Certificate {
         let mut cert_name: Vec<_> = cert_name.into();
         cert_name.truncate(bytes as _);
         Ok(CString::from_vec_with_nul(cert_name)
-            .unwrap()
+            .map_err(|_| "CString::from_vec_with_nul error")?
             .to_str()
-            .unwrap()
+            .map_err(|_| "CString::to_str error")?
             .into())
     }
 
@@ -257,8 +339,22 @@ impl Certificate {
         Ok(buf)
     }
 
-    fn delete(self) -> bool {
-        unsafe { CertDeleteCertificateFromStore(self.0) }.as_bool()
+    fn delete(self) -> Result<(), std::io::Error> {
+        match unsafe { CertDeleteCertificateFromStore(self.0) }.as_bool() {
+            true => Ok(()),
+            false => Err(std::io::Error::last_os_error()),
+        }
+    }
+
+    fn serial_number(&self) -> Result<&[u8], &'static str> {
+        let serial_number = unsafe {
+            (*self.0)
+                .pCertInfo
+                .as_ref()
+                .ok_or("no cert info")?
+                .SerialNumber
+        };
+        Ok(unsafe { from_raw_parts(serial_number.pbData, serial_number.cbData as _) })
     }
 
     fn duplicate(&self) -> Self {
