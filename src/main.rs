@@ -83,32 +83,31 @@ fn main() {
                 eprintln!("Failed to get cert hash");
                 continue;
             };
-            if !trusted_certs_hash.contains(&hash) {
-                let cert_name = cert.name().unwrap_or_else(|err| format!("Err({})", err));
-                let cert_issuer = cert.issuer().unwrap_or_else(|err| format!("Err({})", err));
-                let serial_number = cert.serial_number().unwrap_or_default();
-                let algorithm = cert.algorithm().unwrap_or_default();
+            if trusted_certs_hash.contains(&hash) {
+                continue;
+            }
+            let cert_name = cert.name().unwrap_or_else(|err| format!("Err({})", err));
+            let cert_issuer = cert.issuer().unwrap_or_else(|err| format!("Err({})", err));
+            let serial_number = cert.serial_number().unwrap_or_default();
+            let algorithm = cert.algorithm().unwrap_or_default();
+            let sn = to_hex_string(serial_number, true);
 
-                println!("    {}", cert_name);
-                println!("        Cert Issuer:   {}", cert_issuer);
-                println!(
-                    "        Serial Number: {}",
-                    to_hex_string(serial_number, true)
-                );
-                println!("        Thumbprint:    {}", to_hex_string(&hash, false));
-                println!("        Algorithm:     {}", algorithm);
+            println!("    {}", cert_name);
+            println!("        Cert Issuer:   {}", cert_issuer);
+            println!("        Serial Number: {}", sn);
+            println!("        Thumbprint:    {}", to_hex_string(&hash, false));
+            println!("        Algorithm:     {}", algorithm);
 
-                if delete || dump {
-                    if let Err(err) = backup_store.add_cert(encoded_cert) {
-                        eprintln!("Failed to add cert to backup store: {}", err);
-                        continue;
-                    }
-                    has_changes = true;
+            if delete || dump {
+                if let Err(err) = backup_store.add_cert(encoded_cert) {
+                    eprintln!("Failed to add cert to backup store: {}", err);
+                    continue;
                 }
-                if delete {
-                    if let Err(err) = cert.duplicate().delete() {
-                        eprintln!("Failed to delete cert from store: {}", err);
-                    }
+                has_changes = true;
+            }
+            if delete {
+                if let Err(err) = cert.duplicate().and_then(|dup| dup.delete()) {
+                    eprintln!("Failed to delete cert from store: {}", err);
                 }
             }
         }
@@ -365,11 +364,11 @@ impl Certificate {
         Ok(unsafe { from_raw_parts(serial_number.pbData, serial_number.cbData as _) })
     }
 
-    fn duplicate(&self) -> Self {
+    fn duplicate(&self) -> Result<Self, std::io::Error> {
         let ptr = unsafe { CertDuplicateCertificateContext(Some(self.0)) };
         if ptr.is_null() {
-            panic!("dup error");
+            return Err(std::io::Error::last_os_error());
         }
-        Self(ptr)
+        Ok(Self(ptr))
     }
 }
